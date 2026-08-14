@@ -631,6 +631,87 @@
 
   <hr class="section-sep">
 
+  <!-- Interactive Rat7M: per-camera reconstruction + free view (contributed by Noah Hayes, Netholabs) -->
+  <section id="rat7m-interactive">
+    <div class="container">
+      <h2>Explore the Rat7M reconstruction, camera by camera</h2>
+      <p>
+        Press play to watch the six Rat7M input views alongside BEAST3D's reconstructed 3D point
+        cloud through a 4-minute bout (238 scenes, one per second). Under each input view, the
+        same cloud is re-rendered from that camera's pose; <strong>camera 6 is held out</strong>,
+        so its tile is the model's prediction of a view it never saw. Drag the free view to
+        rotate; use the time slider to scrub.
+      </p>
+
+      <div class="enc-shell" style="margin-top: 20px;">
+        <div class="enc-pane-label">Input cameras (top) &middot; reconstruction from each camera's pose (below)</div>
+        <div class="rat-camgrid" id="ratGrid"></div>
+        <div class="rat-strip">
+          <div class="rat-camgrid" id="ratReconRow"></div>
+        </div>
+
+        <div style="margin-top:14px;">
+          <div class="enc-pane-label">Free view &mdash; a second pass with all six cameras as input, from a draggable camera</div>
+          <div class="enc-pc-wrap" id="ratWrap" style="aspect-ratio: 3 / 1;">
+            <canvas id="ratPc"></canvas>
+            <div class="enc-time-badge" id="ratBadge">t = 00:00</div>
+            <div class="enc-overlay" id="ratOverlay">
+              <div class="spinner"></div>
+              <p id="ratMsg">Loading Rat7M point cloud&hellip;</p>
+            </div>
+          </div>
+        </div>
+
+        <div class="enc-controls">
+          <button class="ctl-btn on" id="ratPlay"><i class="bi bi-pause-fill"></i> Pause</button>
+          <button class="ctl-btn on" id="ratRotate"><i class="bi bi-arrow-repeat"></i> Auto-rotate</button>
+        </div>
+        <div class="enc-controls" style="flex-wrap: nowrap;">
+          <div class="slider-group" style="flex:1 1 auto; min-width:100px;">
+            <span>Time</span>
+            <input type="range" id="ratTime" min="0" max="237" step="1" value="0" style="width:100%;">
+          </div>
+          <div class="slider-group" style="flex:0 0 auto;">
+            <span>Speed</span>
+            <input type="range" id="ratRate" min="1" max="16" step="1" value="10" style="width:70px;">
+            <span id="ratRateVal" style="font-family:var(--font-mono);font-size:12px;">10&times;</span>
+          </div>
+          <div class="slider-group" style="flex:0 0 auto;">
+            <i class="bi bi-circle-fill" style="font-size:9px;"></i>
+            <span>Point size</span>
+            <input type="range" id="ratSize" min="5" max="60" step="1" value="25" style="width:70px;">
+          </div>
+          <div class="slider-group" style="flex:0 0 auto;">
+            <span>Opacity &gt;</span>
+            <input type="range" id="ratOpac" min="6" max="150" step="2" value="42" style="width:80px;">
+            <span id="ratOpacVal" style="font-family:var(--font-mono);font-size:12px;">0.042</span>
+          </div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <style>
+    .rat-camgrid { display: grid; grid-template-columns: repeat(6, 1fr); gap: 8px; }
+    .rat-camname { font-size: 11px; font-weight: 600; color: var(--color-text-muted);
+                   text-align: center; margin-bottom: 4px; letter-spacing: .3px; }
+    .rat-camname .rat-ho { color: var(--color-primary); }
+    .rat-caminput { width: 100%; aspect-ratio: 1 / 1; border-radius: 6px; background: #000; display: block; }
+    .rat-strip { position: relative; width: 100%; margin-top: 8px; }
+    .rat-recontile { width: 100%; aspect-ratio: 1 / 1; border-radius: 6px; overflow: hidden;
+                 position: relative;
+                 background: radial-gradient(circle at 50% 35%, #ffffff 0%, #eef0f2 70%, #e3e6e9 100%); }
+    .rat-recontile canvas { position: absolute; inset: 0; width: 100%; height: 100%; }
+    @media (max-width: 760px) {
+      .rat-camgrid { grid-template-columns: repeat(3, 1fr); }
+    }
+  </style>
+
+  <video id="ratVideo" muted loop playsinline preload="auto" style="display:none"
+         src="assets/encoding/rat7m/web/input_6view.mp4"></video>
+
+  <hr class="section-sep">
+
   <!-- Method -->
   <section id="method">
     <div class="container">
@@ -1465,6 +1546,251 @@
         link.setAttribute('rel', 'noopener noreferrer');
       }
     });
+  </script>
+
+  <!-- Rat7M explorer logic: must come after the import map -->
+  <script type="module">
+  import * as THREE from 'three';
+  import { TrackballControls } from 'three/addons/controls/TrackballControls.js';
+  (async function () {
+    const BASE = 'assets/encoding/rat7m/web/';
+    const $ = (id) => document.getElementById(id);
+    const video = $('ratVideo'), overlay = $('ratOverlay'), msg = $('ratMsg');
+    let META, POS, OPA, OFF, POS6, OPA6, OFF6;
+    try {
+      const [meta, posBuf, opaBuf, pos6Buf, opa6Buf] = await Promise.all([
+        fetch(BASE + 'meta.json').then(r => { if (!r.ok) throw 0; return r.json(); }),
+        fetch(BASE + 'pc_xyz_i16.bin').then(r => r.arrayBuffer()),
+        fetch(BASE + 'pc_opa_u16.bin').then(r => r.arrayBuffer()),
+        fetch(BASE + 'pc6_xyz_i16.bin').then(r => r.arrayBuffer()),
+        fetch(BASE + 'pc6_opa_u16.bin').then(r => r.arrayBuffer())
+      ]);
+      META = meta; POS = new Int16Array(posBuf); OPA = new Uint16Array(opaBuf);
+      POS6 = new Int16Array(pos6Buf); OPA6 = new Uint16Array(opa6Buf);
+      OFF = new Int32Array(META.len + 1); OFF6 = new Int32Array(META.len + 1);
+      for (let i = 0; i < META.len; i++) {
+        OFF[i + 1] = OFF[i] + META.counts[i];
+        OFF6[i + 1] = OFF6[i] + META.counts6[i];
+      }
+    } catch (e) {
+      msg.textContent = "Couldn't load the Rat7M assets.";
+      overlay.querySelector('.spinner').style.display = 'none';
+      return;
+    }
+    const NF = META.len, IMGPX = META.imgpx;
+    let thr = META.defaultThr, frame = -1, autoRotate = true;
+
+    // ---- input tiles: 6 canvases sliced from the (hidden) mosaic video
+    const grid = $('ratGrid'), tileCtx = [];
+    for (let v = 0; v < 6; v++) {
+      const cell = document.createElement('div');
+      cell.innerHTML = '<div class="rat-camname">CAM ' + (v + 1) +
+        (v === META.heldOut ? ' <span class="rat-ho">held-out</span>' : '') +
+        '</div><canvas class="rat-caminput" width="150" height="150"></canvas>';
+      grid.appendChild(cell);
+      tileCtx.push(cell.querySelector('canvas').getContext('2d'));
+    }
+    const reconRow = $('ratReconRow'), reconCtx = [];
+    for (let v = 0; v < 6; v++) {
+      const t = document.createElement('div');
+      t.className = 'rat-recontile';
+      t.innerHTML = '<canvas width="256" height="256"></canvas>';
+      reconRow.appendChild(t);
+      reconCtx.push(t.querySelector('canvas').getContext('2d'));
+    }
+    function drawInputs() {
+      if (video.readyState < 2) return;
+      const w = video.videoWidth / 3, h = video.videoHeight / 2;
+      for (let v = 0; v < 6; v++)
+        tileCtx[v].drawImage(video, (v % 3) * w, Math.floor(v / 3) * h, w, h, 0, 0, 150, 150);
+    }
+
+    // ---- shared geometry (opacity-sorted: threshold = prefix, found by binary search)
+    const MAXC = Math.max(...META.counts);
+    const geo = new THREE.BufferGeometry();
+    const posAttr = new THREE.BufferAttribute(new Float32Array(MAXC * 3), 3);
+    posAttr.setUsage(THREE.DynamicDrawUsage);
+    geo.setAttribute('position', posAttr);
+    geo.boundingSphere = new THREE.Sphere(new THREE.Vector3(0, 0, 0), 4);
+    const VS = `uniform float uSize; uniform float uScale; varying float vDepth;
+      void main(){ vec4 mv=modelViewMatrix*vec4(position,1.0); vDepth=-mv.z;
+        gl_PointSize=max(1.0,uSize*(uScale/-mv.z)); gl_Position=projectionMatrix*mv; }`;
+    const FS = `precision mediump float; uniform float uNear; uniform float uFar;
+      uniform vec3 uColorNear; uniform vec3 uColorFar; varying float vDepth;
+      void main(){ vec2 c=gl_PointCoord-vec2(0.5); if(dot(c,c)>0.25) discard;
+        float s=clamp((vDepth-uNear)/(uFar-uNear),0.0,1.0);
+        gl_FragColor=vec4(mix(uColorNear,uColorFar,s),1.0); }`;
+    const mkMat = () => new THREE.ShaderMaterial({ uniforms: {
+      uSize: { value: 0.025 }, uScale: { value: 600.0 },
+      uNear: { value: 2.0 }, uFar: { value: 4.0 },
+      uColorNear: { value: new THREE.Color('#2b2b33') },
+      uColorFar: { value: new THREE.Color('#cdd2d8') } },
+      vertexShader: VS, fragmentShader: FS });
+
+    function nKeep(f) {
+      const a = OFF[f], n = OFF[f + 1] - a, t = thr * 65535;
+      let lo = 0, hi = n;
+      while (lo < hi) { const m = (lo + hi) >> 1; if (OPA[a + m] >= t) lo = m + 1; else hi = m; }
+      return lo;
+    }
+    function nKeep6(f) {
+      const a = OFF6[f], n = OFF6[f + 1] - a, t = thr * 65535;
+      let lo = 0, hi = n;
+      while (lo < hi) { const m = (lo + hi) >> 1; if (OPA6[a + m] >= t) lo = m + 1; else hi = m; }
+      return lo;
+    }
+
+    // ---- per-camera tiles: direct projection (the numpy-verified math), plain 2D drawing
+    // For camera c with GL basis R (rows given row-major in c.m) at world position c.pos:
+    //   view = R^T (p - (pos - ctr));  xn = (2fx/W xv + (1-2cx/W) zv)/(-zv);
+    //   yn = (2fy/H yv + (2cy/H - 1) zv)/(-zv);  pixel = ((xn+1)/2 W, (1-(yn+1)/2) H)
+    const TILE = 256;
+    let ptScale = 1.0;
+    function drawTiles() {
+      const f = Math.max(0, frame), a = OFF[f], n = nKeep(f), ctr = META.ctrs[f];
+      const sz = Math.max(1, Math.round(ptScale * 2));
+      for (let v = 0; v < 6; v++) {
+        const c = META.cams[v], m = c.m;
+        const px = c.pos[0] - ctr[0], py = c.pos[1] - ctr[1], pz = c.pos[2] - ctr[2];
+        const ax = 2 * c.fx / IMGPX, bx = 1 - 2 * c.cx / IMGPX;
+        const ay = 2 * c.fy / IMGPX, by = 2 * c.cy / IMGPX - 1;
+        const ctx = reconCtx[v];
+        ctx.clearRect(0, 0, TILE, TILE);   // transparent: the tile's gradient shows through
+        const d0 = Math.hypot(px, py, pz);
+        for (let i = 0; i < n; i++) {
+          const j = (a + i) * 3;
+          const X = POS[j] / 32767 - px, Y = POS[j + 1] / 32767 - py, Z = POS[j + 2] / 32767 - pz;
+          const xv = m[0] * X + m[3] * Y + m[6] * Z;    // R^T p  (m is row-major R)
+          const yv = m[1] * X + m[4] * Y + m[7] * Z;
+          const zv = m[2] * X + m[5] * Y + m[8] * Z;
+          if (zv >= -1e-6) continue;
+          const xn = (ax * xv + bx * zv) / (-zv), yn = (ay * yv + by * zv) / (-zv);
+          const u = (xn + 1) * 0.5 * TILE, w2 = (1 - (yn + 1) * 0.5) * TILE;
+          if (u < 0 || u >= TILE || w2 < 0 || w2 >= TILE) continue;
+          const t = Math.min(1, Math.max(0, (-zv - d0 * 0.85) / (d0 * 0.3)));
+          const g = Math.round(43 + t * 160);
+          ctx.fillStyle = 'rgb(' + g + ',' + g + ',' + (g + 8) + ')';
+          ctx.fillRect(u - sz / 2, w2 - sz / 2, sz, sz);
+        }
+      }
+    }
+
+    // ---- free view
+    const wrap = $('ratWrap'), cv = $('ratPc');
+    const freeR = new THREE.WebGLRenderer({ canvas: cv, antialias: true, alpha: true });
+    freeR.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+    const freeScene = new THREE.Scene();
+    const freeCam = new THREE.PerspectiveCamera(45, 3, 0.01, 100);
+    freeCam.position.set(0, 0, 3);
+    const controls = new TrackballControls(freeCam, cv);
+    controls.rotateSpeed = 3.0; controls.zoomSpeed = 1.2; controls.noPan = true;
+    controls.dynamicDampingFactor = 0.15; controls.minDistance = 1.0; controls.maxDistance = 12.0;
+    const freeMat = mkMat();
+    const MAXC6 = Math.max(...META.counts6);
+    const geo6 = new THREE.BufferGeometry();
+    const posAttr6 = new THREE.BufferAttribute(new Float32Array(MAXC6 * 3), 3);
+    posAttr6.setUsage(THREE.DynamicDrawUsage);
+    geo6.setAttribute('position', posAttr6);
+    geo6.boundingSphere = new THREE.Sphere(new THREE.Vector3(0, 0, 0), 4);
+    const spin = new THREE.Group(), aligned = new THREE.Group();
+    aligned.quaternion.setFromRotationMatrix(new THREE.Matrix4().set(
+      META.arot[0], META.arot[1], META.arot[2], 0, META.arot[3], META.arot[4], META.arot[5], 0,
+      META.arot[6], META.arot[7], META.arot[8], 0, 0, 0, 0, 1));
+    aligned.add(new THREE.Points(geo6, freeMat));
+    spin.add(aligned); freeScene.add(spin);
+    function fitFree() {
+      const w = wrap.clientWidth, h = wrap.clientHeight;
+      freeR.setSize(w, h, false); freeCam.aspect = w / h; freeCam.updateProjectionMatrix();
+      controls.handleResize();
+      freeMat.uniforms.uScale.value =
+        (h * freeR.getPixelRatio()) / (2 * Math.tan(THREE.MathUtils.degToRad(45) / 2));
+    }
+    new ResizeObserver(fitFree).observe(wrap); fitFree();
+
+    // ---- frame updates, video as master clock (dt = 1 s per scene)
+    function showFrame(f, force) {
+      f = Math.min(NF - 1, Math.max(0, f));
+      if (f === frame && !force) return;
+      frame = f;
+      const a = OFF[f], n = nKeep(f), arr = posAttr.array;
+      for (let i = 0; i < n; i++) {
+        const j = (a + i) * 3;
+        arr[i * 3] = POS[j] / 32767; arr[i * 3 + 1] = POS[j + 1] / 32767; arr[i * 3 + 2] = POS[j + 2] / 32767;
+      }
+      posAttr.needsUpdate = true; geo.setDrawRange(0, n);
+      drawTiles();
+      const a6 = OFF6[f], n6 = nKeep6(f), arr6 = posAttr6.array;
+      for (let i = 0; i < n6; i++) {
+        const j = (a6 + i) * 3;
+        arr6[i * 3] = POS6[j] / 32767; arr6[i * 3 + 1] = POS6[j + 1] / 32767;
+        arr6[i * 3 + 2] = POS6[j + 2] / 32767;
+      }
+      posAttr6.needsUpdate = true; geo6.setDrawRange(0, n6);
+      $('ratBadge').textContent = 't = ' + String(Math.floor(f / 60)).padStart(2, '0') + ':' +
+        String(f % 60).padStart(2, '0') + '  (scene ' + (f + 1) + '/' + NF + ')';
+      $('ratTime').value = f;
+      drawInputs();
+    }
+    // defaultPlaybackRate too: the load algorithm resets playbackRate to it, and the video
+    // may still be loading when this runs
+    video.defaultPlaybackRate = META.defaultRate;
+    video.playbackRate = META.defaultRate;
+    const playBtn = $('ratPlay'), rotBtn = $('ratRotate');
+    playBtn.addEventListener('click', () => {
+      const playing = video.paused;
+      if (playing) video.play().catch(() => {}); else video.pause();
+      playBtn.classList.toggle('on', playing);
+      playBtn.innerHTML = playing ? '<i class="bi bi-pause-fill"></i> Pause'
+                                  : '<i class="bi bi-play-fill"></i> Play';
+    });
+    rotBtn.addEventListener('click', () => {
+      autoRotate = !autoRotate; rotBtn.classList.toggle('on', autoRotate);
+    });
+    $('ratTime').addEventListener('input', (e) => {
+      video.pause(); playBtn.classList.remove('on');
+      playBtn.innerHTML = '<i class="bi bi-play-fill"></i> Play';
+      video.currentTime = +e.target.value; showFrame(+e.target.value);
+    });
+    $('ratRate').addEventListener('input', (e) => {
+      video.defaultPlaybackRate = +e.target.value;
+      video.playbackRate = +e.target.value;
+      $('ratRateVal').innerHTML = e.target.value + '&times;';
+    });
+    $('ratSize').addEventListener('input', (e) => {   // slider in tenths
+      const v = (+e.target.value) / 10;
+      freeMat.uniforms.uSize.value = v * 0.01;
+      ptScale = v / 2.5;
+      drawTiles();
+    });
+    $('ratOpac').addEventListener('input', (e) => {    // slider in thousandths
+      thr = (+e.target.value) / 1000;
+      $('ratOpacVal').textContent = thr.toFixed(3);
+      showFrame(frame, true);
+    });
+    // pin every thumb to the real initial state (attribute parsing is not trusted)
+    $('ratOpac').value = Math.round(thr * 1000);
+    $('ratSize').value = 25;
+    $('ratRate').value = META.defaultRate;
+    $('ratTime').value = 0;
+    cv.addEventListener('pointerdown', () => wrap.classList.add('dragging'));
+    window.addEventListener('pointerup', () => wrap.classList.remove('dragging'));
+    video.addEventListener('seeked', drawInputs);      // scrub while paused: redraw once the seek lands
+    video.addEventListener('loadeddata', drawInputs);  // autoplay blocked: fill tiles on first data
+
+    overlay.classList.add('hidden');
+    showFrame(0, true);
+    video.play().catch(() => {
+      playBtn.classList.remove('on');
+      playBtn.innerHTML = '<i class="bi bi-play-fill"></i> Play';
+    });
+    (function tick() {
+      requestAnimationFrame(tick);
+      if (!video.paused) showFrame(Math.floor(video.currentTime));
+      if (autoRotate) spin.rotation.y += 0.004;
+      controls.update();
+      freeR.render(freeScene, freeCam);
+    })();
+  })();
   </script>
 
 </body>
